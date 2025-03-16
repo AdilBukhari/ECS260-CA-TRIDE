@@ -31,72 +31,72 @@ import itertools as it
 import pytest
 
 
-def fn__pglift(repres: th.Tensor, labels: th.Tensor, *, metric: str):
-    '''
-    Generalized lifted-structure loss function
-    '''
-    # Determine the margin for the specific metric
+def _get_metric_config(metric):
+    """Helper function to get metric-specific configuration"""
     if metric in ('C', 'N'):
-        margin = configs.glift.margin_cosine
-        repres = th.nn.functional.normalize(repres, p=2, dim=-1)
-    elif metric in ('E',):
-        margin = configs.glift.margin_euclidean
-    # Sampling
-    anc, pos, neg = miner(repres, labels, method='spc2-lifted', metric=metric)
-    # Calculate Loss
-    losses = []
-    for (i, idx) in enumerate(anc):
-        repA = repres[idx, :].view(-1)
-        repP = repres[pos[i], :]
-        repN = repres[neg[i], :]
-        #
-        if metric in ('E', 'N'):
-            __pdist = ft.partial(th.nn.functional.pairwise_distance, p=2)
-        else:
-            def __pdist(p, n): return 1 - \
-                th.nn.functional.cosine_similarity(p, n, dim=-1)
-        pos_term = th.logsumexp(__pdist(repA, repP), dim=-1)
-        neg_term = th.logsumexp(margin - __pdist(repA, repN), dim=-1)
-        losses.append((pos_term + neg_term).relu())
-    loss = th.mean(th.stack(losses)) + configs.glift.l2_weight * \
-        th.mean(repres.norm(p=2, dim=-1))
-    return loss
+        return configs.glift.margin_cosine, True
+    return configs.glift.margin_euclidean, False
 
+def _calculate_distance(p, n, normalize=False):
+    """Helper function to calculate distance based on normalization"""
+    if normalize:
+        return 1 - th.nn.functional.cosine_similarity(p, n, dim=-1)
+    return th.nn.functional.pairwise_distance(p, n, p=2)
+
+def fn__pglift(repres: th.Tensor, labels: th.Tensor, *, metric: str):
+    margin, should_normalize = _get_metric_config(metric)
+    
+    if should_normalize:
+        repres = th.nn.functional.normalize(repres, p=2, dim=-1)
+    
+    anc, pos, neg = miner(repres, labels, method='spc2-lifted', metric=metric)
+    
+    losses = []
+    for idx, p_idx, n_idx in zip(anc, pos, neg):
+        repA = repres[idx].view(-1)
+        repP = repres[p_idx]
+        repN = repres[n_idx]
+        
+        pos_dist = _calculate_distance(repA, repP, should_normalize)
+        neg_dist = _calculate_distance(repA, repN, should_normalize)
+        
+        loss = th.logsumexp(pos_dist, dim=-1) + th.logsumexp(margin - neg_dist, dim=-1)
+        losses.append(loss.relu())
+    
+    return th.mean(th.stack(losses)) + configs.glift.l2_weight * th.mean(repres.norm(p=2, dim=-1))
 
 class pglift(th.nn.Module):
     _datasetspec = 'SPC-2'
-
+    _metric = None
+    
     def __call__(self, *args, **kwargs):
-        return ft.partial(fn__pglift, metric=self._metric)(*args, **kwargs)
-
+        return fn__pglift(*args, metric=self._metric, **kwargs)
+    
     def determine_metric(self):
         return self._metric
-
+    
     def datasetspec(self):
         return self._datasetspec
-
 
 class pgliftC(pglift):
     _metric = 'C'
 
-
 class pgliftE(pglift):
     _metric = 'E'
-
 
 class pgliftN(pglift):
     _metric = 'N'
 
+def test_fn_glift():
+    output = th.rand(10, 32, requires_grad=True)
+    labels = th.randint(3, (10,))
+    for metric in ('C', 'E', 'N'):
+        loss = fn__pglift(output, labels, metric=metric)
+        loss.backward()
 
-@pytest.mark.parametrize('metric', ('C', 'E', 'N'))
-def test_fn_glift(metric):
-    output, labels = th.rand(10, 32, requires_grad=True), th.randint(3, (10,))
-    loss = fn__pglift(output, labels, metric=metric)
-    loss.backward()
-
-
-@pytest.mark.parametrize('func', (pgliftC, pgliftE, pgliftN))
-def test_glift(func):
-    output, labels = th.rand(10, 32, requires_grad=True), th.randint(3, (10,))
-    loss = func()(output, labels)
-    loss.backward()
+def test_glift():
+    output = th.rand(10, 32, requires_grad=True)
+    labels = th.randint(3, (10,))
+    for func in (pgliftC, pgliftE, pgliftN):
+        loss = func()(output, labels)
+        loss.backward()
