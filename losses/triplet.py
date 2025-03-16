@@ -14,63 +14,41 @@ See the License for the specific language governing permissions and
 limitations under the License.
 '''
 
-from ast import Pass
-import os
-from this import d
 import torch as th
-import numpy as np
-import math as m
-import sys
-import datasets
-import models
-import tensorflow as tf
-from models import template_rank
+import torch.nn.functional as F
 import configs
-from utility import utils
-import torch as t
-import torch.nn as nn
-from torch.autograd import Variable
 from .miner import miner
 import functools as ft
 import itertools as it
 import pytest
-import torch.nn.functional as F
 import rich
-from defenses import pnp
 c = rich.get_console()
 global epoch_n
 global maxepoch
-last_modify_epoch = 0.0
+
+def _get_margin(metric: str) -> float:
+    """
+    Helper function to determine the margin based on the metric.
+    """
+    if metric in ('C', 'N'):
+        return configs.triplet.margin_cosine
+    elif metric in ('E',):
+        return configs.triplet.margin_euclidean
+    else:
+        raise ValueError(f'Illegal metric type {metric}!')
+
 
 def fn_ptriplet_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
                        *, metric: str, margin: float):
     '''
     <functional> the core computation for spc-2 triplet loss.
     '''
-    global trip_margin
-    global last_modify_epoch
-    global d_ap_his
-
     if metric == 'C':
         dap = 1 - F.cosine_similarity(repA, repP, dim=-1)
         dan = 1 - F.cosine_similarity(repA, repN, dim=-1)
         loss = (dap - dan + margin).relu().mean()
     elif metric in ('E', 'N'):
-        d_ap = F.pairwise_distance(repA, repP, p=2)
-        d_an = F.pairwise_distance(repA, repN, p=2)
-        _, ap_top_half_idx = th.topk(d_ap, len(d_ap)//2, largest = False) 
-        _, an_top_half_idx = th.topk(d_an, len(d_an)//2, largest = False) 
-        ap_top_half = d_ap[ap_top_half_idx].mean()
-        an_top_half = d_an[an_top_half_idx].mean()
-
-        if last_modify_epoch == 1.0:
-            loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2)\
-                        + 1/2 * (ap_top_half - an_top_half + 0.04).relu() 
-            last_modify_epoch = 0.0
-        else:
-            loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2)
-            last_modify_epoch = 1.0
-        
+        loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2)
     else:
         raise ValueError(f'Illegal metric type {metric}!')
     return loss
@@ -85,11 +63,9 @@ def fn_ptriplet(repres: th.Tensor, labels: th.Tensor,
     metrics: C = cosine, E = euclidean, N = normalization + euclidean
     '''
     # Determine the margin for the specific metric
+    margin = _get_margin(metric)
     if metric in ('C', 'N'):
-        margin = configs.triplet.margin_cosine
         repres = F.normalize(repres, p=2, dim=-1)
-    elif metric in ('E',):
-        margin = configs.triplet.margin_euclidean
     # Sample the triplets
     anc, pos, neg = miner(repres, labels, template_rank.epoch_n, template_rank.maxepoch,pnp.Perturbing_method, method=minermethod,
                           metric=metric, margin=margin, p_switch=p_switch)
@@ -128,10 +104,7 @@ class ptriplet(th.nn.Module):
         global maxepoch
         epoch_n = epoch
         maxepoch = max_epoch
-        if self._metric in ('C', 'N'):
-            margin = configs.triplet.margin_cosine
-        elif self._metric in ('E',):
-            margin = configs.triplet.margin_euclidean
+        margin = _get_margin(self._metric)
         if override_margin is not None:
             margin = override_margin
         loss = fn_ptriplet_kernel(repA, repP, repN,
