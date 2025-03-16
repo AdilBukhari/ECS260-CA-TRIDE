@@ -30,23 +30,32 @@ import pytorch_metric_learning.reducers
 import pytorch_metric_learning.distances
 
 
-def _index_filter(indeces: tuple, most: int):
+def _index_filter(indices: tuple, most: int):
     '''
     Pytorch-metric-learning's miners outputs too many usable tuples
     so that OOM is very easy to trigger.
     '''
-    sel = th.randint(len(indeces[0]), (most,)).to(indeces[0].device)
-    return tuple(indeces[i][sel] for i in range(len(indeces)))
+    num_indices = len(indices[0])
+    if num_indices > most:
+        sel = th.randperm(num_indices)[:most].to(indices[0].device)
+        return tuple(ind[sel] for ind in indices)
+    return indices
 
 
 class ExtraLossN(th.nn.Module):
+    def __init__(self, loss_func, miner, metric, datasetspec='SPC-2'):
+        super().__init__()
+        self._lossfunc = loss_func
+        self._miner = miner
+        self._metric = metric
+        self._datasetspec = datasetspec
 
-    def __call__(self, *args, **kwargs):
+    def forward(self, *args, **kwargs):
         repres, labels = args[0], args[1].view(-1)
         repres = th.nn.functional.normalize(repres, p=2)
-        indeces = self._miner(repres, labels)
-        indeces = _index_filter(indeces, repres.size(0))
-        return self._lossfunc(repres, labels, indeces)
+        indices = self._miner(repres, labels)
+        indices = _index_filter(indices, repres.size(0))
+        return self._lossfunc(repres, labels, indices)
 
     def determine_metric(self):
         return self._metric
@@ -56,33 +65,31 @@ class ExtraLossN(th.nn.Module):
 
 
 class pstripN(ExtraLossN):
-    _datasetspec = 'SPC-2'
-    _lossfunc = dml.losses.TripletMarginLoss(
-        margin=configs.triplet.margin_euclidean,
-        reducer=dml.reducers.ThresholdReducer(low=0.),
-        distance=dml.distances.LpDistance(
-            p=2, power=1, normalize_embeddings=True)
-    )
-    _miner = dml.miners.TripletMarginMiner(
-        margin=configs.triplet.margin_euclidean,
-        type_of_triplets='semihard')
-    _metric = 'N'
+    def __init__(self):
+        loss_func = dml.losses.TripletMarginLoss(
+            margin=configs.triplet.margin_euclidean,
+            reducer=dml.reducers.ThresholdReducer(low=0.),
+            distance=dml.distances.LpDistance(
+                p=2, power=1, normalize_embeddings=True)
+        )
+        miner = dml.miners.TripletMarginMiner(
+            margin=configs.triplet.margin_euclidean,
+            type_of_triplets='semihard')
+        super().__init__(loss_func, miner, 'N')
 
 
 class pangularN(ExtraLossN):
-    _datasetspec = 'SPC-2'
-    _lossfunc = dml.losses.AngularLoss()
-    _miner = dml.miners.AngularMiner()
-    _metric = 'N'
+    def __init__(self):
+        super().__init__(dml.losses.AngularLoss(), dml.miners.AngularMiner(), 'N')
 
 
 class pncaN(ExtraLossN):
-    _datasetspec = 'SPC-2'
-    _lossfunc = dml.losses.NCALoss()
-    _miner = dml.miners.TripletMarginMiner(
-        margin=configs.triplet.margin_euclidean,
-        type_of_triplets='semihard')
-    _metric = 'N'
+    def __init__(self):
+        loss_func = dml.losses.NCALoss()
+        miner = dml.miners.TripletMarginMiner(
+            margin=configs.triplet.margin_euclidean,
+            type_of_triplets='semihard')
+        super().__init__(loss_func, miner, 'N')
 
 
 def test_pstripN():
