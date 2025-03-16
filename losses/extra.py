@@ -18,8 +18,6 @@ Loss functions borrowed from Pytorch-Metric-Learning
 '''
 import numpy as np
 import torch as th
-import sys
-sys.path.append('/home/tianqiwei/jupyter/rob_IR/')
 import datasets
 import configs
 from utility import utils
@@ -31,18 +29,16 @@ import pytorch_metric_learning.distances
 
 
 def _index_filter(indeces: tuple, most: int):
-    '''
-    Pytorch-metric-learning's miners outputs too many usable tuples
-    so that OOM is very easy to trigger.
-    '''
-    sel = th.randint(len(indeces[0]), (most,)).to(indeces[0].device)
-    return tuple(indeces[i][sel] for i in range(len(indeces)))
+    device = indeces[0].device
+    if len(indeces[0]) <= most:
+        return indeces
+    sel = th.arange(most, device=device)
+    return tuple(idx[:most] for idx in indeces)
 
 
 class ExtraLossN(th.nn.Module):
-
     def __call__(self, *args, **kwargs):
-        repres, labels = args[0], args[1].view(-1)
+        repres, labels = args[0], args[1]
         repres = th.nn.functional.normalize(repres, p=2)
         indeces = self._miner(repres, labels)
         indeces = _index_filter(indeces, repres.size(0))
@@ -57,27 +53,27 @@ class ExtraLossN(th.nn.Module):
 
 class pstripN(ExtraLossN):
     _datasetspec = 'SPC-2'
+    _metric = 'N'
     _lossfunc = dml.losses.TripletMarginLoss(
         margin=configs.triplet.margin_euclidean,
         reducer=dml.reducers.ThresholdReducer(low=0.),
-        distance=dml.distances.LpDistance(
-            p=2, power=1, normalize_embeddings=True)
+        distance=dml.distances.LpDistance(p=2, power=1, normalize_embeddings=True)
     )
     _miner = dml.miners.TripletMarginMiner(
         margin=configs.triplet.margin_euclidean,
         type_of_triplets='semihard')
-    _metric = 'N'
 
 
 class pangularN(ExtraLossN):
     _datasetspec = 'SPC-2'
+    _metric = 'N'
     _lossfunc = dml.losses.AngularLoss()
     _miner = dml.miners.AngularMiner()
-    _metric = 'N'
 
 
 class pncaN(ExtraLossN):
     _datasetspec = 'SPC-2'
+    _metric = 'N'
     _lossfunc = dml.losses.NCALoss()
     _miner = dml.miners.TripletMarginMiner(
         margin=configs.triplet.margin_euclidean,
