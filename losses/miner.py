@@ -1,5 +1,3 @@
-
-
 # pylint: disable=no-member
 import torch as th
 import numpy as np
@@ -43,9 +41,6 @@ def miner(repres: th.Tensor, labels: th.Tensor, current_epoch, maxepoch, perturb
     else:
         raise NotImplementedError
     if p_switch > 0.0 and (np.random.rand() < p_switch):
-        # spectrum regularization (following ICML20 paper text description)
-        # return (anchor, negative, positive)  # XXX: lead to notable performance drop
-        # spectrum regulairzation (following upstream code)
         return (anchor, anchor, positive)
     return (anchor, positive, negative)
 
@@ -79,12 +74,8 @@ def __miner_spc2_npair(repres: th.Tensor, labels: th.Tensor) -> tuple:
     '''
     negatives = []
     for i in range(repres.size(0) // 2):
-        # identify negative
         mask_lneg = (labels[2 * i] != labels)
-        if mask_lneg.sum() > 0:
-            negatives.append(th.where(mask_lneg)[0])
-        else:
-            negatives.append([np.random.choice(len(labels))])
+        negatives.append(th.where(mask_lneg)[0] if mask_lneg.any() else th.tensor([np.random.choice(len(labels))], device=repres.device))
     anchors = th.arange(0, len(labels), 2)
     positives = th.arange(1, len(labels), 2)
     return (anchors, positives, negatives)
@@ -110,18 +101,15 @@ def __miner_spc2_lifted(repres: th.Tensor, labels: th.Tensor) -> tuple:
       (int, list[int], list[int]) or alike.
     '''
     positives, negatives = [], []
-    ###
     for i in range(repres.size(0) // 2):
-        # identify positive
-        mask_lpos = (labels[2 * i] == labels)
-        positive = list(set(th.where(mask_lpos)[0].tolist()) - {2 * i, })
+        anchor_idx = 2 * i
+        mask_lpos = (labels[anchor_idx] == labels)
+        positive = [idx for idx in th.where(mask_lpos)[0].tolist() if idx != anchor_idx]
         positives.append(positive)
-        # identify negative
-        mask_lneg = (labels[2 * i] != labels)
-        if mask_lneg.sum() > 0:
-            negatives.append(th.where(mask_lneg)[0])
-        else:
-            negatives.append([np.random.choice(len(labels))])
+
+        mask_lneg = (labels[anchor_idx] != labels)
+        negatives.append(th.where(mask_lneg)[0] if mask_lneg.any() else th.tensor([np.random.choice(len(labels))], device=repres.device))
+
     anchors = th.arange(0, len(labels), 2)
     return (anchors, positives, negatives)
 
@@ -152,7 +140,6 @@ def __miner_pdist(repres: th.Tensor, metric: str) -> th.Tensor:
         elif metric in ('E', 'N'):
             if metric == 'N':
                 repres = F.normalize(repres, dim=-1)
-            # Memory efficient pairwise euclidean distance matrix
             prod = th.mm(repres, repres.t())
             norm = prod.diag().unsqueeze(1).expand_as(prod)
             pdist = (norm + norm.t() - 2 * prod).sqrt()
@@ -168,15 +155,18 @@ def __miner_inverse_sphere_distance(
     '''
     log_q_d_inv = (2.0 - dim) * th.log(dists) - ((dim - 3.0) /
                                                  2.0) * th.log(1.0 - 0.25 * dists.pow(2))
-    log_q_d_inv[th.where(labels == labels[thisidx])[0]] = 0.
+    log_q_d_inv[labels == labels[thisidx]] = 0.
     q_d_inv = th.exp(log_q_d_inv - log_q_d_inv.max())
-    q_d_inv[th.where(labels == labels[thisidx])[0]] = 0.
-    q_d_inv = np.nan_to_num(q_d_inv.detach().cpu().numpy())
+    q_d_inv[labels == labels[thisidx]] = 0.
+    q_d_inv = q_d_inv.detach().cpu().numpy()
+    q_d_inv = np.nan_to_num(q_d_inv)
+    
     if q_d_inv.sum() == 0.:
         q_d_inv[:] = 1e-7
-    q_d_inv = q_d_inv / q_d_inv.sum()
+    
+    q_d_inv /= q_d_inv.sum()
+    
     if np.isnan(q_d_inv).sum() > 0:
-        # remove the NaN elements, or np.random.choice would complain
         nan_mask = np.isnan(q_d_inv)
         q_d_inv[nan_mask] = 0.
         residual = np.max([1.0 - q_d_inv.sum(), 0.0])
@@ -193,7 +183,6 @@ def __miner_spc2_distance(
     negs = []
     pdist = __miner_pdist(repres, metric)
     for i in range(repres.size(0) // 2):
-        # inverse distribution
         inv_q_d = __miner_inverse_sphere_distance(
             pdist[2 * i, :], labels, 2 * i, repres.size(1))
         negs.append(np.random.choice(len(labels), p=inv_q_d))
@@ -227,29 +216,29 @@ def __miner_spc2_semihard(
     negs = []
     pdist = __miner_pdist(repres, metric)
     for i in range(repres.size(0) // 2):
-        # condition 1.
-        mask_pdist = (pdist[2 * i, 2 * i + 1].pow(2) < pdist[2 * i, :].pow(2))
-        # condition 2.
-        mask_tripl = (pdist[2 * i, 2 * i + 1] - pdist[2 * i, :] + margin > 0.0)
-        # is it negative?
-        mask_label = (labels != labels[2 * i])
-        # reduce.
-        mask = ft.reduce(th.logical_and, [mask_pdist, mask_tripl, mask_label])
-        if mask.sum() > 0:
-            # there is satisfying negative
+        anchor_idx = 2 * i
+        positive_idx = 2 * i + 1
+
+        mask_pdist = (pdist[anchor_idx, positive_idx].pow(2) < pdist[anchor_idx, :].pow(2))
+        mask_tripl = (pdist[anchor_idx, positive_idx] - pdist[anchor_idx, :] + margin > 0.0)
+        mask_label = (labels != labels[anchor_idx])
+        
+        mask = mask_pdist & mask_tripl & mask_label
+        
+        if mask.any():
             argwhere = th.where(mask)[0]
-        elif mask_label.sum() > 0:
-            # no satisfying sample. just pick a negative one.
+        elif mask_label.any():
             argwhere = th.where(mask_label)[0]
         else:
-            # no negative sample. just pick anything.
             argwhere = th.arange(len(labels))
+        
         negs.append(random.choice(argwhere).item())
 
     anchors = th.arange(0, len(labels), 2)
     positives = th.arange(1, len(labels), 2)
     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
     return (anchors, positives, negatives)
+
 
 def __miner_spc2_gradualhard(
         repres: th.Tensor, labels: th.Tensor,current_epoch, maxepoch, perturbing_method, metric: str, margin: float) -> tuple:
@@ -262,14 +251,16 @@ def __miner_spc2_gradualhard(
     margin_g = 0.2*((1- current_epoch/(2*maxepoch))**2)
     # margin_g = 0.2*((1- current_epoch/(maxepoch)))
     for i in range(repres.size(0) // 2):
+        anchor_idx = 2 * i
+        positive_idx = 2 * i + 1
         # condition 1.
-        mask_pdist = (pdist[2 * i, 2 * i + 1].pow(2) < pdist[2 * i, :].pow(2))
+        mask_pdist = (pdist[anchor_idx, positive_idx].pow(2) < pdist[anchor_idx, :].pow(2))
         # condition 2.
-        mask_tripl = (pdist[2 * i, 2 * i + 1] - pdist[2 * i, :] + margin_g > 0.0)
+        mask_tripl = (pdist[anchor_idx, positive_idx] - pdist[anchor_idx, :] + margin_g > 0.0)
         # is it negative?
-        mask_label = (labels != labels[2 * i])
+        mask_label = (labels != labels[anchor_idx])
         # reduce.
-        mask = ft.reduce(th.logical_and, [mask_pdist, mask_tripl, mask_label])
+        mask = mask_pdist & mask_tripl & mask_label
         if mask.sum() > 0:
             # there is satisfying negative
             argwhere = th.where(mask)[0]
@@ -308,37 +299,31 @@ def __miner_spc2_softhard(
     negs, poss = [], []
     pdist = __miner_pdist(repres, metric)
     for i in range(repres.size(0) // 2):
-        # mark positive and negative
-        mask_lneg = (labels != labels[2 * i])
-        mask_lpos = (labels == labels[2 * i])
-        # sample soft negative
-        if mask_lneg.sum() > 0:
-            maxap2 = th.masked_select(pdist[2 * i, :], mask_lpos).max().pow(2)
-            mask_sneg = th.logical_and(
-                pdist[2 * i, :].pow(2) < maxap2, mask_lneg)
-            if mask_sneg.sum() > 0:
-                argwhere = th.where(mask_sneg)[0]
-            else:
-                argwhere = th.where(mask_lneg)[0]
+        anchor_idx = 2 * i
+        positive_idx = 2 * i + 1
+
+        mask_lneg = (labels != labels[anchor_idx])
+        mask_lpos = (labels == labels[anchor_idx])
+
+        if mask_lneg.any():
+            maxap2 = th.masked_select(pdist[anchor_idx, :], mask_lpos).max().pow(2)
+            mask_sneg = (pdist[anchor_idx, :].pow(2) < maxap2) & mask_lneg
+            argwhere = th.where(mask_sneg)[0] if mask_sneg.any() else th.where(mask_lneg)[0]
         else:
             argwhere = th.arange(len(labels))
         negs.append(random.choice(argwhere).item())
-        # sample soft positive
-        if mask_lpos.sum() > 0:
-            if mask_lneg.sum() > 0:
-                minan2 = th.masked_select(
-                    pdist[2 * i, :], mask_lneg).min().pow(2)
-                mask_spos = th.logical_and(
-                    pdist[2 * i, :].pow(2) > minan2, mask_lpos)
-                if mask_spos.sum() > 0:
-                    argwhere = th.where(mask_spos)[0]
-                else:
-                    argwhere = th.where(mask_lpos)[0]
+
+        if mask_lpos.any():
+            if mask_lneg.any():
+                minan2 = th.masked_select(pdist[anchor_idx, :], mask_lneg).min().pow(2)
+                mask_spos = (pdist[anchor_idx, :].pow(2) > minan2) & mask_lpos
+                argwhere = th.where(mask_spos)[0] if mask_spos.any() else th.where(mask_lpos)[0]
                 poss.append(random.choice(argwhere).item())
             else:
-                poss.append(2 * i + 1)
+                poss.append(positive_idx)
         else:
-            poss.append(2 * i + 1)
+            poss.append(positive_idx)
+
     anchors = th.arange(0, len(labels), 2)
     positives = th.tensor(poss, dtype=th.long, device=repres.device)
     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
@@ -394,13 +379,8 @@ def __miner_spc2_random(
     '''
     negs = []
     for i in range(labels.nelement() // 2):
-        # [ method 1: 40it/s legion
         mask_neg = (labels != labels[2 * i])
-        if mask_neg.sum() > 0:
-            negs.append(random.choice(th.where(mask_neg)[0]).item())
-        else:
-            # handle rare/corner cases where the batch is bad
-            negs.append(np.random.choice(len(labels)))
+        negs.append(random.choice(th.where(mask_neg)[0]).item() if mask_neg.any() else np.random.choice(len(labels)))
 
     anchors = th.arange(0, len(labels), 2)
     positives = th.arange(1, len(labels), 2)
