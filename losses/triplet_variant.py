@@ -34,49 +34,47 @@ import rich
 c = rich.get_console()
 
 
-def fn_pquad(repres: th.Tensor, labels: th.Tensor, *, metric: str,
-             minermethod: str, p_switch: float = -1.0):
-    '''
-    Quadruplet Loss Function
-    '''
-    # Determine the margin for the specific metric
+def get_metric_params(metric):
+    """Helper function to get metric-specific parameters"""
     if metric in ('C', 'N'):
         margin = configs.triplet.margin_cosine
         margin2 = configs.quadruplet.margin2_cosine
-        repres = F.normalize(repres, p=2, dim=-1)
-    elif metric in ('E',):
+        use_cosine = True
+    else:  # metric == 'E'
         margin = configs.triplet.margin_euclidean
         margin2 = configs.quadruplet.margin2_euclidean
-    # Sample the triplets
+        use_cosine = False
+    return margin, margin2, use_cosine
+
+def calculate_distance(x, y, use_cosine=True):
+    """Helper function to calculate distance between tensors"""
+    if use_cosine:
+        return 1 - F.cosine_similarity(x, y, dim=-1)
+    return F.pairwise_distance(x, y, p=2)
+
+def fn_pquad(repres: th.Tensor, labels: th.Tensor, *, metric: str,
+             minermethod: str, p_switch: float = -1.0):
+    margin, margin2, use_cosine = get_metric_params(metric)
+    if use_cosine:
+        repres = F.normalize(repres, p=2, dim=-1)
+    
     anc, pos, neg = miner(repres, labels, method=minermethod,
-                          metric=metric, margin=margin, p_switch=p_switch)
+                         metric=metric, margin=margin, p_switch=p_switch)
+    
+    # Sample second negative
     mask2 = th.logical_and(neg != neg.view(-1, 1),
-                           labels.view(-1)[neg] != labels.view(-1)[neg].view(-1, 1))
-    neg2 = [np.random.choice(th.where(mask)[0].cpu()) if any(th.where(mask)[0])
-            else np.random.choice(repres.size(0)) for mask in mask2]
-    neg2 = th.tensor(neg2).to(repres.device)
-    # Calculate Triplet Loss: tloss
-    __cos = ft.partial(F.cosine_similarity, dim=-1)
-    __euc = ft.partial(F.pairwise_distance, p=2)
-    if metric == 'C':
-        dap = 1 - __cos(repres[anc, :], repres[pos, :])
-        dan = 1 - __cos(repres[anc, :], repres[neg, :])
-        tloss = (dap - dan + margin).clamp(min=0.).mean()
-    elif metric in ('E', 'N'):
-        __triplet = ft.partial(F.triplet_margin_loss, p=2, margin=margin)
-        tloss = __triplet(repres[anc, :], repres[pos, :], repres[neg, :])
-    else:
-        raise ValueError(f'Illegal metric type {metric}!')
-    # Calculate Quadruplet Loss: qloss
-    if metric in ('E', 'N'):
-        dap = __euc(repres[anc, :], repres[pos, :])
-        dnn = __euc(repres[neg, :], repres[neg2, :])
-        qloss = (dap - dnn + margin2).relu().mean()
-    elif metric == 'C':
-        dap = 1 - __cos(repres[anc, :], repres[pos, :])
-        dnn = 1 - __cos(repres[neg, :], repres[neg2, :])
-        qloss = (dap - dnn + margin2).relu().mean()
-    # sum and return
+                          labels.view(-1)[neg] != labels.view(-1)[neg].view(-1, 1))
+    neg2 = th.tensor([np.random.choice(th.where(mask)[0].cpu() if any(th.where(mask)[0])
+                      else range(repres.size(0))) for mask in mask2]).to(repres.device)
+    
+    # Calculate distances
+    dap = calculate_distance(repres[anc], repres[pos], use_cosine)
+    dan = calculate_distance(repres[anc], repres[neg], use_cosine)
+    dnn = calculate_distance(repres[neg], repres[neg2], use_cosine)
+    
+    tloss = (dap - dan + margin).clamp(min=0.).mean()
+    qloss = (dap - dnn + margin2).relu().mean()
+    
     return tloss + qloss
 
 
@@ -88,33 +86,24 @@ def test_fn_pquad(metric, minermethod):
     loss.backward()
 
 
-class pquad(th.nn.Module):
+class MetricLoss(th.nn.Module):
+    """Base class for metric losses"""
     _datasetspec = 'SPC-2'
     _minermethod = 'spc2-random'
-
+    
     def __call__(self, *args, **kwargs):
-        return ft.partial(fn_pquad, metric=self._metric,
-                          minermethod=self._minermethod)(*args, **kwargs)
+        return ft.partial(self._loss_fn, metric=self._metric,
+                         minermethod=self._minermethod)(*args, **kwargs)
+    
+    def determine_metric(self): return self._metric
+    def datasetspec(self): return self._datasetspec
 
-    def determine_metric(self):
-        return self._metric
+class pquad(MetricLoss):
+    _loss_fn = staticmethod(fn_pquad)
 
-    def datasetspec(self):
-        return self._datasetspec
-
-
-class pquadC(pquad):
-    _metric = 'C'
-
-
-class pquadE(pquad):
-    _metric = 'E'
-
-
-class pquadN(pquad):
-    _metric = 'N'
-
-
+class pquadC(pquad): _metric = 'C'
+class pquadE(pquad): _metric = 'E'
+class pquadN(pquad): _metric = 'N'
 class pdquadN(pquad):
     _metric = 'N'
     _minermethod = 'spc2-distance'
@@ -129,34 +118,22 @@ def test_pquad(func):
 
 def fn_rhomboid(repres: th.Tensor, labels: th.Tensor, *,
                 metric: str, minermethod: str, p_switch: float = -1.0):
-    '''
-    my private rhomboid loss implementation (for SPC-2 batch)
-    '''
-    # Determine the margin for the specific metric
-    if metric in ('C', 'N'):
-        margin = configs.triplet.margin_cosine
+    margin, _, use_cosine = get_metric_params(metric)
+    if use_cosine:
         repres = F.normalize(repres, p=2, dim=-1)
-    elif metric in ('E',):
-        margin = configs.triplet.margin_euclidean
-    # Sample the triplets
+    
     anc, pos, neg = miner(repres, labels, method=minermethod,
-                          metric=metric, margin=margin, p_switch=p_switch)
+                         metric=metric, margin=margin, p_switch=p_switch)
     ne2 = (neg - th.sign((neg % 2) - 0.5)).long()
-    # Calculate Loss
-    if metric == 'C':
-        def __dist(x, y): return 1 - F.cosine_similarity(x, y)
-    elif metric in ('E', 'N'):
-        __dist = F.pairwise_distance
-    else:
-        raise ValueError(f'Illegal metric type {metric}!')
-    # a, p, n
-    dap = __dist(repres[anc, :], repres[pos, :])
-    dan = __dist(repres[anc, :], repres[neg, :])
+    
+    dap = calculate_distance(repres[anc], repres[pos], use_cosine)
+    dan = calculate_distance(repres[anc], repres[neg], use_cosine)
+    xdap = calculate_distance(repres[neg], repres[ne2], use_cosine)
+    xdan = calculate_distance(repres[neg], repres[anc], use_cosine)
+    
     loss = (dap - dan + margin).relu().mean()
-    # n, n2, a
-    xdap = __dist(repres[neg, :], repres[ne2, :])
-    xdan = __dist(repres[neg, :], repres[anc, :])
     xloss = (xdap - xdan + margin).relu().mean()
+    
     return loss + xloss
 
 
@@ -168,33 +145,12 @@ def test_fn_rhomboid(metric, minermethod):
     loss.backward()
 
 
-class prhom(th.nn.Module):
-    _datasetspec = 'SPC-2'
-    _minermethod = 'spc2-random'
+class prhom(MetricLoss):
+    _loss_fn = staticmethod(fn_rhomboid)
 
-    def __call__(self, *args, **kwargs):
-        return ft.partial(fn_rhomboid, metric=self._metric,
-                          minermethod=self._minermethod)(*args, **kwargs)
-
-    def determine_metric(self):
-        return self._metric
-
-    def datasetspec(self):
-        return self._datasetspec
-
-
-class prhomC(prhom):
-    _metric = 'C'
-
-
-class prhomE(prhom):
-    _metric = 'E'
-
-
-class prhomN(prhom):
-    _metric = 'N'
-
-
+class prhomC(prhom): _metric = 'C'
+class prhomE(prhom): _metric = 'E'
+class prhomN(prhom): _metric = 'N'
 class pdrhomN(prhom):
     _metric = 'N'
     _minermethod = 'spc2-distance'
@@ -331,35 +287,12 @@ def fn_pgil(repres: th.Tensor, labels: th.Tensor,
     return loss
 
 
-class pgil(th.nn.Module):
-    _datasetspec = 'SPC-2'
-    _minermethod = 'spc2-random'
+class pgil(MetricLoss):
+    _loss_fn = staticmethod(fn_pgil)
 
-    def __call__(self, *args, **kwargs):
-        if hasattr(self, '_minermethod'):
-            return ft.partial(fn_pgil, metric=self._metric,
-                              minermethod=self._minermethod)(*args, **kwargs)
-        else:
-            return ft.partial(fn_pgil, metric=self._metric)(
-                *args, **kwargs)
-
-    def determine_metric(self):
-        return self._metric
-
-    def datasetspec(self):
-        return self._datasetspec
-
-
-class pgilC(pgil):
-    _metric = 'C'
-
-
-class pgilE(pgil):
-    _metric = 'E'
-
-
-class pgilN(pgil):
-    _metric = 'N'
+class pgilC(pgil): _metric = 'C'
+class pgilE(pgil): _metric = 'E'
+class pgilN(pgil): _metric = 'N'
 
 
 @pytest.mark.parametrize('func', (pgilC, pgilE, pgilN))
