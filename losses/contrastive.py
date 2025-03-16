@@ -27,61 +27,49 @@ from .miner import miner
 import pytest
 import itertools as it
 
+def get_margin(metric):
+    """Helper function to determine margin based on metric type"""
+    return configs.contrastive.margin_cosine if metric in ('C', 'N') else configs.contrastive.margin_euclidean
 
-def fn_pcontrast_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
-                        *, metric: str, margin: float):
-    '''
-    <functional> the core computation for spc-2 contrastive loss.
-    '''
-    if metric in ('C',):
+def fn_pcontrast_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor, *, metric: str, margin: float):
+    '''<functional> the core computation for spc-2 contrastive loss.'''
+    if metric == 'C':
         targets = th.ones(repA.size(0)).to(repA.device)
-        lap = F.cosine_embedding_loss(repA, repP, targets, margin=margin)
-        lan = F.cosine_embedding_loss(repA, repN, -targets, margin=margin)
-        loss = lap + lan
-    elif metric in ('E', 'N'):
-        __pd = ft.partial(th.nn.functional.pairwise_distance, p=2)
-        lap = __pd(repA, repP).mean()
+        loss = F.cosine_embedding_loss(repA, repP, targets, margin=margin) + \
+               F.cosine_embedding_loss(repA, repN, -targets, margin=margin)
+    else:  # metric in ('E', 'N')
+        pd = ft.partial(F.pairwise_distance, p=2)
+        lap = pd(repA, repP).mean()
         lap = th.tensor(0.).to(repA.device) if th.isnan(lap) else lap
-        lan = margin - __pd(repA, repN)
+        
+        lan = margin - pd(repA, repN)
         lan = th.masked_select(lan, lan > 0.).mean()
         lan = th.tensor(0.).to(repA.device) if th.isnan(lan) else lan
+        
         loss = lap + lan
     return loss
 
-
-def fn_pcontrast(repres: th.Tensor, labels: th.Tensor, *,
-                 metric: str, minermethod: str = 'spc2-random', p_switch: float = -1.0):
-    '''
-    Functional version of contrastive loss function with cosine distance
-    as the distance metric. Metric is either 'C' (for cosine) or 'E' for
-    euclidean.
-    Dataset type should be SPC-2 (according to ICML20 reference)
-    '''
-    # determine the margin
+def fn_pcontrast(repres: th.Tensor, labels: th.Tensor, *, metric: str, minermethod: str = 'spc2-random', p_switch: float = -1.0):
+    '''Functional version of contrastive loss function'''
+    margin = get_margin(metric)
     if metric in ('C', 'N'):
-        margin = configs.contrastive.margin_cosine
-    elif metric in ('E', ):
-        margin = configs.contrastive.margin_euclidean
-    # normalize representation on demand
-    if metric in ('C', 'N'):
-        repres = th.nn.functional.normalize(repres, p=2, dim=-1)
-    # sampling triplets
-    ancs, poss, negs = miner(
-        repres, labels, method=minermethod, metric=metric, margin=margin, p_switch=p_switch)
-    # loss
-    loss = fn_pcontrast_kernel(repres[ancs, :], repres[poss, :],
-                               repres[negs, :], metric=metric, margin=margin)
-    return loss
+        repres = F.normalize(repres, p=2, dim=-1)
+    
+    ancs, poss, negs = miner(repres, labels, method=minermethod, metric=metric, margin=margin, p_switch=p_switch)
+    return fn_pcontrast_kernel(repres[ancs, :], repres[poss, :], repres[negs, :], metric=metric, margin=margin)
 
-
-class pcontrastC(th.nn.Module):
-    _metric = 'C'
+class BaseContrast(th.nn.Module):
+    """Base class for all contrast losses"""
     _datasetspec = 'SPC-2'
-    _minermethod = 'spc2-random'
+    
+    def __init__(self, metric, minermethod='spc2-random', p_switch=-1.0):
+        super().__init__()
+        self._metric = metric
+        self._minermethod = minermethod
+        self._p_switch = p_switch
 
     def __call__(self, *args, **kwargs):
-        return ft.partial(fn_pcontrast, metric=self._metric,
-                          minermethod=self._minermethod)(*args, **kwargs)
+        return fn_pcontrast(*args, metric=self._metric, minermethod=self._minermethod, p_switch=self._p_switch, **kwargs)
 
     def determine_metric(self):
         return self._metric
@@ -91,51 +79,29 @@ class pcontrastC(th.nn.Module):
 
     def raw(self, repA, repP, repN):
         if self._metric in ('C', 'N'):
-            margin = configs.contrastive.margin_cosine
-        elif self._metric in ('E', ):
-            margin = configs.contrastive.margin_euclidean
-        loss = fn_pcontrast_kernel(repA, repP, repN,
-                                   metric=self._metric, margin=margin)
-        return loss
+            repA, repP, repN = map(lambda x: F.normalize(x, dim=-1), (repA, repP, repN))
+        return fn_pcontrast_kernel(repA, repP, repN, metric=self._metric, margin=get_margin(self._metric))
 
+# Simplified class definitions using inheritance
+class pcontrastC(BaseContrast):
+    def __init__(self):
+        super().__init__('C')
 
-class pcontrastE(pcontrastC):
-    _metric = 'E'
+class pcontrastE(BaseContrast):
+    def __init__(self):
+        super().__init__('E')
 
+class pcontrastN(BaseContrast):
+    def __init__(self):
+        super().__init__('N')
 
-class pcontrastN(pcontrastC):
-    _metric = 'N'
+class pdcontrastN(BaseContrast):
+    def __init__(self):
+        super().__init__('N', 'spc2-distance')
 
-
-class pdcontrastN(th.nn.Module):
-    _metric = 'N'
-    _datasetspec = 'SPC-2'
-
-    def __call__(self, *args, **kwargs):
-        return ft.partial(fn_pcontrast, metric=self._metric,
-                          minermethod='spc2-distance')(*args, **kwargs)
-
-    def determine_metric(self):
-        return self._metric
-
-    def datasetspec(self):
-        return self._datasetspec
-
-
-class pDcontrastN(th.nn.Module):
-    _metric = 'N'
-    _datasetspec = 'SPC-2'
-
-    def __call__(self, *args, **kwargs):
-        return ft.partial(fn_pcontrast, metric=self._metric,
-                          minermethod='spc2-distance', p_switch=0.15)(*args, **kwargs)
-
-    def determine_metric(self):
-        return self._metric
-
-    def datasetspec(self):
-        return self._datasetspec
-
+class pDcontrastN(BaseContrast):
+    def __init__(self):
+        super().__init__('N', 'spc2-distance', 0.15)
 
 @pytest.mark.parametrize('metric, minermethod',
                          it.product(('C', 'E', 'N'), ('spc2-random', 'spc2-distance')))
