@@ -1,5 +1,3 @@
-
-
 # pylint: disable=no-member
 import torch as th
 import numpy as np
@@ -19,33 +17,21 @@ def miner(repres: th.Tensor, labels: th.Tensor, current_epoch, maxepoch, perturb
     assert(len(repres.shape) == 2)
     assert(metric is not None)
     labels = labels.view(-1)
-    if method == 'random-triplet':
-        return __miner_random(repres, labels)
-    elif method == 'spc2-random':
-        anchor, positive, negative = __miner_spc2_random(repres, labels)
-    elif method == 'spc2-semihard':
-        anchor, positive, negative = __miner_spc2_semihard(
-            repres, labels, metric, margin)
-    elif method == 'spc2-hard':
-        anchor, positive, negative = __miner_spc2_hard(repres, labels, metric)
-    elif method == 'spc2-softhard':
-        anchor, positive, negative = __miner_spc2_softhard(
-            repres, labels, metric)
-    elif method == 'spc2-distance':
-        anchor, positive, negative = __miner_spc2_distance(
-            repres, labels, metric)
-    elif method == 'spc2-lifted':
-        anchor, positive, negative = __miner_spc2_lifted(repres, labels)
-    elif method == 'spc2-npair':
-        anchor, positive, negative = __miner_spc2_npair(repres, labels)
-    elif method == 'spc2-ghard':
-        anchor, positive, negative = __miner_spc2_gradualhard(repres, labels,current_epoch, maxepoch,perturbing_method, metric, margin)
-    else:
+    miner_methods = {
+        'random-triplet': __miner_random,
+        'spc2-random': __miner_spc2_random,
+        'spc2-semihard': __miner_spc2_semihard,
+        'spc2-hard': __miner_spc2_hard,
+        'spc2-softhard': __miner_spc2_softhard,
+        'spc2-distance': __miner_spc2_distance,
+        'spc2-lifted': __miner_spc2_lifted,
+        'spc2-npair': __miner_spc2_npair,
+        'spc2-ghard': __miner_spc2_gradualhard
+    }
+    if method not in miner_methods:
         raise NotImplementedError
+    anchor, positive, negative = miner_methods[method](repres, labels, metric, margin, current_epoch, maxepoch, perturbing_method)
     if p_switch > 0.0 and (np.random.rand() < p_switch):
-        # spectrum regularization (following ICML20 paper text description)
-        # return (anchor, negative, positive)  # XXX: lead to notable performance drop
-        # spectrum regulairzation (following upstream code)
         return (anchor, anchor, positive)
     return (anchor, positive, negative)
 
@@ -71,7 +57,7 @@ def test_miner(mmethod, metric):
         assert(ln is not None)
 
 
-def __miner_spc2_npair(repres: th.Tensor, labels: th.Tensor) -> tuple:
+def __miner_spc2_npair(repres: th.Tensor, labels: th.Tensor, *args) -> tuple:
     '''
     Miner for N-Pair loss
     return type is a little bit special:
@@ -102,15 +88,14 @@ def test_miner_spc2_npair():
             assert(la == lp and la != ln)
 
 
-def __miner_spc2_lifted(repres: th.Tensor, labels: th.Tensor) -> tuple:
+def __miner_spc2_lifted(repres: th.Tensor, labels: th.Tensor, *args) -> tuple:
     '''
     Miner for generalized lifted-structure loss function
 
     The return type is a little bit special:
       (int, list[int], list[int]) or alike.
     '''
-    positives, negatives = [], []
-    ###
+    positives, negatives = []
     for i in range(repres.size(0) // 2):
         # identify positive
         mask_lpos = (labels[2 * i] == labels)
@@ -185,7 +170,7 @@ def __miner_inverse_sphere_distance(
 
 
 def __miner_spc2_distance(
-        repres: th.Tensor, labels: th.Tensor, metric: str) -> tuple:
+        repres: th.Tensor, labels: th.Tensor, metric: str, *args) -> tuple:
     '''
     Distance-weighted tuple mining (Wu et al. 2017)
     (unit hyper-sphere)
@@ -215,7 +200,7 @@ def test_miner_spc2_distance(metric):
 
 
 def __miner_spc2_semihard(
-        repres: th.Tensor, labels: th.Tensor, metric: str, margin: float) -> tuple:
+        repres: th.Tensor, labels: th.Tensor, metric: str, margin: float, *args) -> tuple:
     '''
     Sampling semihard negatives from pairwise (SPC-2) data batch.
     https://arxiv.org/pdf/1503.03832.pdf
@@ -251,15 +236,16 @@ def __miner_spc2_semihard(
     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
     return (anchors, positives, negatives)
 
+
 def __miner_spc2_gradualhard(
-        repres: th.Tensor, labels: th.Tensor,current_epoch, maxepoch, perturbing_method, metric: str, margin: float) -> tuple:
+        repres: th.Tensor, labels: th.Tensor, current_epoch, maxepoch, perturbing_method, metric: str, margin: float) -> tuple:
     '''
     gradually hard examples, hardness grow along withe proces of training
     '''
     # if perturbing_method == 'Candidate':
     negs = []
     pdist = __miner_pdist(repres, metric)
-    margin_g = 0.2*((1- current_epoch/(2*maxepoch))**2)
+    margin_g = 0.2 * ((1 - current_epoch / (2 * maxepoch)) ** 2)
     # margin_g = 0.2*((1- current_epoch/(maxepoch)))
     for i in range(repres.size(0) // 2):
         # condition 1.
@@ -287,7 +273,6 @@ def __miner_spc2_gradualhard(
     return (anchors, positives, negatives)
 
 
-
 @pytest.mark.parametrize('metric', ('C', 'E', 'N'))
 def test_miner_spc2_semihard(metric):
     repres, labels = __tester_repres_labels()
@@ -301,7 +286,7 @@ def test_miner_spc2_semihard(metric):
 
 
 def __miner_spc2_softhard(
-        repres: th.Tensor, labels: th.Tensor, metric: str) -> tuple:
+        repres: th.Tensor, labels: th.Tensor, metric: str, *args) -> tuple:
     '''
     Sampling softhard negatives from pairwise (SPC-2) data batch.
     '''
@@ -357,7 +342,7 @@ def test_miner_spc2_softhard(metric):
 
 
 def __miner_spc2_hard(
-        repres: th.Tensor, labels: th.Tensor, metric: str) -> list:
+        repres: th.Tensor, labels: th.Tensor, metric: str, *args) -> list:
     '''
     Sampling hard negatives from pairwise (SPC-2) data batch.
     XXX: Very unstable due to noisy hardest.
@@ -388,7 +373,7 @@ def test_miner_spc2_hard(metric):
 
 
 def __miner_spc2_random(
-        repres: th.Tensor, labels: th.Tensor) -> (th.Tensor, th.Tensor, th.Tensor):
+        repres: th.Tensor, labels: th.Tensor, *args) -> (th.Tensor, th.Tensor, th.Tensor):
     '''
     Sampling triplets from pairwise data
     '''
@@ -419,7 +404,7 @@ def test_miner_spc2_random(metric):
         assert(la == lp and la != ln)
 
 
-def __miner_random(repres: th.Tensor, labels: th.Tensor):
+def __miner_random(repres: th.Tensor, labels: th.Tensor, *args):
     if isinstance(labels, th.Tensor):
         labels = labels.detach().cpu().numpy()
 
