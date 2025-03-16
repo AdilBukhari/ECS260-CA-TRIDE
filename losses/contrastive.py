@@ -16,12 +16,6 @@ limitations under the License.
 
 import torch as th
 import torch.nn.functional as F
-import numpy as np
-import sys
-sys.path.append('/home/tianqiwei/jupyter/rob_IR/')
-import datasets
-import configs
-from utility import utils
 import functools as ft
 from .miner import miner
 import pytest
@@ -33,12 +27,12 @@ def fn_pcontrast_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
     '''
     <functional> the core computation for spc-2 contrastive loss.
     '''
-    if metric in ('C',):
+    if metric == 'C':
         targets = th.ones(repA.size(0)).to(repA.device)
         lap = F.cosine_embedding_loss(repA, repP, targets, margin=margin)
         lan = F.cosine_embedding_loss(repA, repN, -targets, margin=margin)
         loss = lap + lan
-    elif metric in ('E', 'N'):
+    else:
         __pd = ft.partial(th.nn.functional.pairwise_distance, p=2)
         lap = __pd(repA, repP).mean()
         lap = th.tensor(0.).to(repA.device) if th.isnan(lap) else lap
@@ -90,13 +84,8 @@ class pcontrastC(th.nn.Module):
         return self._datasetspec
 
     def raw(self, repA, repP, repN):
-        if self._metric in ('C', 'N'):
-            margin = configs.contrastive.margin_cosine
-        elif self._metric in ('E', ):
-            margin = configs.contrastive.margin_euclidean
-        loss = fn_pcontrast_kernel(repA, repP, repN,
-                                   metric=self._metric, margin=margin)
-        return loss
+        margin = configs.contrastive.margin_cosine if self._metric == 'C' else configs.contrastive.margin_euclidean
+        return fn_pcontrast_kernel(repA, repP, repN, metric=self._metric, margin=margin)
 
 
 class pcontrastE(pcontrastC):
