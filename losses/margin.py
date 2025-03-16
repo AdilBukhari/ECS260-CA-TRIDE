@@ -16,17 +16,9 @@ limitations under the License.
 
 import torch as th
 import os
-import numpy as np
 import functools as ft
 from .miner import miner
-import sys
-sys.path.append('/home/tianqiwei/jupyter/rob_IR/')
-import datasets
-import configs
-from utility import utils
 import torch.nn.functional as F
-import itertools as it
-import pytest
 
 
 def fn_pmargin_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
@@ -54,8 +46,8 @@ def fn_pmargin_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
 
 
 def fn_pmargin(repres: th.Tensor, labels: th.Tensor, *,
-               beta: float = configs.margin.beta,
-               margin: float = configs.margin.margin,
+               beta: float,
+               margin: float,
                metric: str, minermethod: str = 'spc2-random'):
     '''
     Margin loss, functional version.
@@ -73,12 +65,13 @@ def fn_pmargin(repres: th.Tensor, labels: th.Tensor, *,
 
 class pmarginC(th.nn.Module):
     _metric = 'C'
-    _margin: float = configs.margin.margin
-    _minermethod = 'spc2-random'
 
-    def __init__(self):
+    def __init__(self, margin: float, beta: float, lr_beta: float):
         super(pmarginC, self).__init__()
-        self.beta = th.nn.Parameter(th.tensor(configs.margin.beta))
+        self._margin = margin
+        self._minermethod = 'spc2-random'
+        self.beta = th.nn.Parameter(th.tensor(beta))
+        self.lr_beta = lr_beta
 
     def raw(self, repA, repP, repN):
         '''
@@ -92,12 +85,12 @@ class pmarginC(th.nn.Module):
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, repres: th.Tensor, labels: th.Tensor):
         if int(os.getenv('DEBUG', -1)) > 0:
             print('* margin: current beta = ', self.beta.data)
-        return ft.partial(fn_pmargin, metric=self._metric,
+        return fn_pmargin(repres, labels, metric=self._metric,
                           minermethod=self._minermethod,
-                          beta=self.beta, margin=self._margin)(*args, **kwargs)
+                          beta=self.beta, margin=self._margin)
 
     def determine_metric(self):
         return self._metric
@@ -106,7 +99,7 @@ class pmarginC(th.nn.Module):
         return 'SPC-2'
 
     def getOptim(self):
-        optim = th.optim.SGD(self.parameters(), lr=configs.margin.lr_beta)
+        optim = th.optim.SGD(self.parameters(), lr=self.lr_beta)
         return optim
 
 
