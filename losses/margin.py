@@ -35,91 +35,60 @@ def fn_pmargin_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
     <functional> the core computation for spc-2 margin loss.
     see ICML20 "revisiting deep metric learing ..."
     '''
-    if metric in ('E', 'N'):
-        dap = F.pairwise_distance(repA, repP)
-        dan = F.pairwise_distance(repA, repN)
-    elif metric in ('C',):
-        dap = 1 - F.cosine_similarity(repA, repP)
-        dan = 1 - F.cosine_similarity(repA, repN)
-    else:
-        raise ValueError
-    lap = (dap - beta + margin).relu()
-    lan = (beta - dan + margin).relu()
-    lap = th.masked_select(lap, lap > 0.).mean()
-    lap = th.tensor(0.).to(repA.device) if th.isnan(lap) else lap
-    lan = th.masked_select(lan, lan > 0.).mean()
-    lan = th.tensor(0.).to(repA.device) if th.isnan(lan) else lan
-    loss = lap + lan
-    return loss
+    is_euclidean = metric in ('E', 'N')
+    dap = F.pairwise_distance(repA, repP) if is_euclidean else 1 - F.cosine_similarity(repA, repP)
+    dan = F.pairwise_distance(repA, repN) if is_euclidean else 1 - F.cosine_similarity(repA, repN)
+
+    def safe_mean(x):
+        masked = th.masked_select(x, x > 0.)
+        mean = masked.mean()
+        return th.tensor(0.).to(repA.device) if th.isnan(mean) else mean
+
+    lap = safe_mean((dap - beta + margin).relu())
+    lan = safe_mean((beta - dan + margin).relu())
+    return lap + lan
 
 
 def fn_pmargin(repres: th.Tensor, labels: th.Tensor, *,
                beta: float = configs.margin.beta,
                margin: float = configs.margin.margin,
                metric: str, minermethod: str = 'spc2-random'):
-    '''
-    Margin loss, functional version.
-    '''
-    # normalize representations on demand
     if metric in ('C', 'N'):
         repres = F.normalize(repres, dim=-1)
-    # select triplets
     ancs, poss, negs = miner(repres, labels, method=minermethod, metric=metric)
-    # loss
-    loss = fn_pmargin_kernel(repres[ancs, :], repres[poss, :], repres[negs, :],
-                             metric=metric, margin=margin, beta=beta)
-    return loss
+    return fn_pmargin_kernel(repres[ancs], repres[poss], repres[negs],
+                            metric=metric, margin=margin, beta=beta)
 
 
-class pmarginC(th.nn.Module):
-    _metric = 'C'
+class MarginBase(th.nn.Module):
+    _metric = None
     _margin: float = configs.margin.margin
     _minermethod = 'spc2-random'
 
     def __init__(self):
-        super(pmarginC, self).__init__()
+        super().__init__()
         self.beta = th.nn.Parameter(th.tensor(configs.margin.beta))
 
     def raw(self, repA, repP, repN):
-        '''
-        raw mode used by robrank/defenses/pnp
-        '''
-        #print('marigin raw is called!')
-        loss = fn_pmargin_kernel(repA, repP, repN, metric=self._metric,
-                                 margin=self._margin, beta=self.beta)
-        return loss
-
-    def forward(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
+        return fn_pmargin_kernel(repA, repP, repN, metric=self._metric,
+                               margin=self._margin, beta=self.beta)
 
     def __call__(self, *args, **kwargs):
         if int(os.getenv('DEBUG', -1)) > 0:
             print('* margin: current beta = ', self.beta.data)
-        return ft.partial(fn_pmargin, metric=self._metric,
-                          minermethod=self._minermethod,
-                          beta=self.beta, margin=self._margin)(*args, **kwargs)
+        return fn_pmargin(*args, metric=self._metric,
+                         minermethod=self._minermethod,
+                         beta=self.beta, margin=self._margin, **kwargs)
 
-    def determine_metric(self):
-        return self._metric
-
-    def datasetspec(self):
-        return 'SPC-2'
-
-    def getOptim(self):
-        optim = th.optim.SGD(self.parameters(), lr=configs.margin.lr_beta)
-        return optim
+    def determine_metric(self): return self._metric
+    def datasetspec(self): return 'SPC-2'
+    def getOptim(self): return th.optim.SGD(self.parameters(), lr=configs.margin.lr_beta)
 
 
-class pmarginE(pmarginC):
-    _metric = 'E'
-
-
-class pmarginN(pmarginC):
-    _metric = 'N'
-
-
-class pdmarginN(pmarginN):
-    _minermethod = 'spc2-distance'
+class pmarginC(MarginBase): _metric = 'C'
+class pmarginE(MarginBase): _metric = 'E'
+class pmarginN(MarginBase): _metric = 'N'
+class pdmarginN(pmarginN): _minermethod = 'spc2-distance'
 
 
 @pytest.mark.parametrize('metric, minermethod', it.product(('C', 'E', 'N'),
