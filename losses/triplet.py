@@ -14,43 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 '''
 
-from ast import Pass
-import os
-from this import d
 import torch as th
-import numpy as np
-import math as m
-import sys
-import datasets
-import models
-import tensorflow as tf
-from models import template_rank
-import configs
-from utility import utils
-import torch as t
 import torch.nn as nn
-from torch.autograd import Variable
+import torch.nn.functional as F
 from .miner import miner
+import configs
 import functools as ft
 import itertools as it
 import pytest
-import torch.nn.functional as F
-import rich
 from defenses import pnp
-c = rich.get_console()
-global epoch_n
-global maxepoch
-last_modify_epoch = 0.0
 
 def fn_ptriplet_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
                        *, metric: str, margin: float):
     '''
     <functional> the core computation for spc-2 triplet loss.
     '''
-    global trip_margin
-    global last_modify_epoch
-    global d_ap_his
-
     if metric == 'C':
         dap = 1 - F.cosine_similarity(repA, repP, dim=-1)
         dan = 1 - F.cosine_similarity(repA, repN, dim=-1)
@@ -58,23 +36,14 @@ def fn_ptriplet_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
     elif metric in ('E', 'N'):
         d_ap = F.pairwise_distance(repA, repP, p=2)
         d_an = F.pairwise_distance(repA, repN, p=2)
-        _, ap_top_half_idx = th.topk(d_ap, len(d_ap)//2, largest = False) 
-        _, an_top_half_idx = th.topk(d_an, len(d_an)//2, largest = False) 
+        _, ap_top_half_idx = th.topk(d_ap, len(d_ap)//2, largest=False)
+        _, an_top_half_idx = th.topk(d_an, len(d_an)//2, largest=False)
         ap_top_half = d_ap[ap_top_half_idx].mean()
         an_top_half = d_an[an_top_half_idx].mean()
-
-        if last_modify_epoch == 1.0:
-            loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2)\
-                        + 1/2 * (ap_top_half - an_top_half + 0.04).relu() 
-            last_modify_epoch = 0.0
-        else:
-            loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2)
-            last_modify_epoch = 1.0
-        
+        loss = F.triplet_margin_loss(repA, repP, repN, margin=0.2) + 1/2 * (ap_top_half - an_top_half + 0.04).relu()
     else:
         raise ValueError(f'Illegal metric type {metric}!')
     return loss
-
 
 def fn_ptriplet(repres: th.Tensor, labels: th.Tensor,
                 *, metric: str, minermethod: str, p_switch: float = -1.0, xa: bool = False):
@@ -107,15 +76,10 @@ class ptriplet(th.nn.Module):
     _xa = False
 
     def __call__(self, *args, **kwargs):
-        if hasattr(self, '_minermethod'):
-            return ft.partial(fn_ptriplet,
-                              metric=self._metric,
-                              minermethod=self._minermethod,
-                              xa=self._xa)(*args, **kwargs)
-        else:
-            return ft.partial(fn_ptriplet,
-                              metric=self._metric,
-                              xa=self._xa)(*args, **kwargs)
+        return ft.partial(fn_ptriplet,
+                          metric=self._metric,
+                          minermethod=self._minermethod,
+                          xa=self._xa)(*args, **kwargs)
 
     def determine_metric(self):
         return self._metric
@@ -124,10 +88,6 @@ class ptriplet(th.nn.Module):
         return self._datasetspec
 
     def raw(self, repA, repP, repN, epoch, max_epoch, *, override_margin: float = None):
-        global epoch_n
-        global maxepoch
-        epoch_n = epoch
-        maxepoch = max_epoch
         if self._metric in ('C', 'N'):
             margin = configs.triplet.margin_cosine
         elif self._metric in ('E',):
