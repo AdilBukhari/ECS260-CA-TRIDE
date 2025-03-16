@@ -1,18 +1,4 @@
-'''
-Copyright (C) 2019-2021, Mo Zhou <cdluminate@gmail.com>
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-'''
 
 # pylint: disable=no-member
 import torch as th
@@ -297,44 +283,6 @@ def __miner_spc2_gradualhard(
     anchors = th.arange(0, len(labels), 2)
     positives = th.arange(1, len(labels), 2)
     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
-    # else:
-    #     negs, poss = [], []
-    #     pdist = __miner_pdist(repres, metric)
-    #     for i in range(repres.size(0) // 2):
-    #         # mark positive and negative
-    #         mask_lneg = (labels != labels[2 * i])
-    #         mask_lpos = (labels == labels[2 * i])
-    #         # sample soft negative
-    #         if mask_lneg.sum() > 0:
-    #             maxap2 = th.masked_select(pdist[2 * i, :], mask_lpos).max().pow(2)
-    #             mask_sneg = th.logical_and(
-    #                 pdist[2 * i, :].pow(2) < maxap2, mask_lneg)
-    #             if mask_sneg.sum() > 0:
-    #                 argwhere = th.where(mask_sneg)[0]
-    #             else:
-    #                 argwhere = th.where(mask_lneg)[0]
-    #         else:
-    #             argwhere = th.arange(len(labels))
-    #         negs.append(random.choice(argwhere).item())
-    #         # sample soft positive
-    #         if mask_lpos.sum() > 0:
-    #             if mask_lneg.sum() > 0:
-    #                 minan2 = th.masked_select(
-    #                     pdist[2 * i, :], mask_lneg).min().pow(2)
-    #                 mask_spos = th.logical_and(
-    #                     pdist[2 * i, :].pow(2) > minan2, mask_lpos)
-    #                 if mask_spos.sum() > 0:
-    #                     argwhere = th.where(mask_spos)[0]
-    #                 else:
-    #                     argwhere = th.where(mask_lpos)[0]
-    #                 poss.append(random.choice(argwhere).item())
-    #             else:
-    #                 poss.append(2 * i + 1)
-    #         else:
-    #             poss.append(2 * i + 1)
-    #     anchors = th.arange(0, len(labels), 2)
-    #     positives = th.tensor(poss, dtype=th.long, device=repres.device)
-    #     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
     
     return (anchors, positives, negatives)
 
@@ -453,14 +401,7 @@ def __miner_spc2_random(
         else:
             # handle rare/corner cases where the batch is bad
             negs.append(np.random.choice(len(labels)))
-        # [ method 2: 35it/s legion
-        # candidates = tuple(filter(lambda x: x // 2 != i,
-        #                          range(labels.nelement())))
-        # while True:
-        #    neg = random.sample(candidates, 1)
-        #    if labels[i * 2].item() != labels[neg].item():
-        #        break
-        # negs.append(*neg)
+
     anchors = th.arange(0, len(labels), 2)
     positives = th.arange(1, len(labels), 2)
     negatives = th.tensor(negs, dtype=th.long, device=repres.device)
@@ -481,32 +422,7 @@ def test_miner_spc2_random(metric):
 def __miner_random(repres: th.Tensor, labels: th.Tensor):
     if isinstance(labels, th.Tensor):
         labels = labels.detach().cpu().numpy()
-    # {0.052} sec the commented implementation is slower
-    # uniq, counts = np.unique(labels, return_counts=True)
-    # if all(x < 2 for x in counts):
-    #   # No Anchor-Positive Collision, We use a fallback A-A-N strategy
-    #   sampled_triplets = [(x, x, random.choice(tuple(set(range(len(labels))) - {x}))) for x in range(len(labels))]
-    # else:
-    #   cls2idx = {i: set(np.argwhere(i == labels).ravel()) for i in uniq}
-    #   apcomb = [list(it.product(cls2idx[x], cls2idx[x])) for (i,x) in enumerate(uniq) if counts[i]>1]
-    #   apcomb = [list(it.filterfalse(lambda x: x[0] == x[1], x)) for x in apcomb]
-    #   negs = [set(range(len(labels))) - set(cls2idx[x]) for (i,x) in enumerate(uniq) if counts[i]>1]
-    #   groups = [list((*xx, yy) for (xx, yy) in it.product(x, y)) for (x,y) in zip(apcomb, negs)]
-    #   sampled_triplets = list(ft.reduce(list.__add__, groups))
 
-    # {0.051} sec slow
-    # uniq, counts = np.unique(labels, return_counts=True)
-    # if all(x < 2 for x in counts):
-    #    # No Anchor-Positive Collision, We use a fallback A-A-N strategy
-    #    sampled_triplets = [(x, x, random.choice(tuple(set(range(len(labels))) - {x}))) for x in range(len(labels))]
-    # else:
-    #    cls2idx = {i: set(np.argwhere(i == labels).ravel()) for i in uniq}
-    #    negs = {x: set(range(len(labels))) - set(cls2idx[x]) for (i,x) in enumerate(uniq) if counts[i]>1}
-    #    apncomb = [list(it.product(it.filterfalse(lambda y: y[0] == y[1],
-    #       it.product(cls2idx[x], cls2idx[x])), negs[x])) for (i,x) in enumerate(uniq) if counts[i]>1]
-    #    sampled_triplets = [(*x, y) for z in apncomb for (x, y) in z]
-
-    # {0.046} sec fastest
     unique_classes, counts = np.unique(labels, return_counts=True)
     if all(x < 2 for x in counts):
         # No Anchor-Positive Collision, We use a fallback A-A-N strategy
