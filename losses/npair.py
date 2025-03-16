@@ -42,41 +42,11 @@ def fn__pnpair(repres: th.Tensor, labels: th.Tensor, *, metric: str):
     # Calculate Loss
     losses = []
     for (i, idx) in enumerate(anc):
-        #repA = repres[idx, :].view(-1)
-        # XXX: this norm trick helps alot according to my own observation
         repA = th.nn.functional.normalize(repres[idx, :].view(-1), dim=-1)
         repP = repres[pos[i], :]
         repN = repres[neg[i], :]
         inner = th.mv(repN - repP, repA)
-        # -- ICML 20 implementation: maybe incorrect?
-        losses.append(th.log(1 + th.sum(th.exp(inner))))
-        # -- Original paper (N-pair-ovo)
-        # losses.append(
-        #    th.logaddexp(
-        #        th.tensor(0.0).to(
-        #            inner.device),
-        #        inner).sum())
-
-        # [ICLM20] upstream implementation -- but it does not converge ...
-        # anchor = idx
-        # positive = pos[i]
-        # negative_set = neg[i]
-        # batch = repres
-        # anchors = anc
-        # a_embs, p_embs, n_embs = batch[anchor:anchor +
-        #                                1], batch[positive:positive +
-        #                                          1], batch[negative_set]
-        # inner_sum = a_embs[:, None, :].bmm(
-        #     (n_embs - p_embs[:, None, :]).permute(0, 2, 1))
-        # inner_sum = inner_sum.view(inner_sum.shape[0], inner_sum.shape[-1])
-        # l = torch.mean(
-        #     torch.log(
-        #         torch.sum(
-        #             torch.exp(inner_sum),
-        #             dim=1) + 1)) / len(anchors)
-        # l = l + configs.npair.l2_weight * \
-        #     torch.mean(torch.norm(batch, p=2, dim=1)) / len(anchors)
-        # losses.append(l)
+        losses.append(th.log(1 + th.exp(inner)))
     loss = th.mean(th.stack(losses)) + configs.npair.l2_weight * \
         th.mean(repres.norm(p=2, dim=-1))
     return loss
