@@ -38,19 +38,19 @@ def fn_pmargin_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor,
     if metric in ('E', 'N'):
         dap = F.pairwise_distance(repA, repP)
         dan = F.pairwise_distance(repA, repN)
-    elif metric in ('C',):
+    elif metric == 'C':
         dap = 1 - F.cosine_similarity(repA, repP)
         dan = 1 - F.cosine_similarity(repA, repN)
     else:
-        raise ValueError
-    lap = (dap - beta + margin).relu()
-    lan = (beta - dan + margin).relu()
-    lap = th.masked_select(lap, lap > 0.).mean()
+        raise ValueError("Unsupported metric type")
+    
+    lap = th.masked_select((dap - beta + margin).relu(), lambda x: x > 0.).mean()
+    lan = th.masked_select((beta - dan + margin).relu(), lambda x: x > 0.).mean()
+    
     lap = th.tensor(0.).to(repA.device) if th.isnan(lap) else lap
-    lan = th.masked_select(lan, lan > 0.).mean()
     lan = th.tensor(0.).to(repA.device) if th.isnan(lan) else lan
-    loss = lap + lan
-    return loss
+    
+    return lap + lan
 
 
 def fn_pmargin(repres: th.Tensor, labels: th.Tensor, *,
@@ -66,9 +66,8 @@ def fn_pmargin(repres: th.Tensor, labels: th.Tensor, *,
     # select triplets
     ancs, poss, negs = miner(repres, labels, method=minermethod, metric=metric)
     # loss
-    loss = fn_pmargin_kernel(repres[ancs, :], repres[poss, :], repres[negs, :],
+    return fn_pmargin_kernel(repres[ancs, :], repres[poss, :], repres[negs, :],
                              metric=metric, margin=margin, beta=beta)
-    return loss
 
 
 class pmarginC(th.nn.Module):
@@ -77,27 +76,22 @@ class pmarginC(th.nn.Module):
     _minermethod = 'spc2-random'
 
     def __init__(self):
-        super(pmarginC, self).__init__()
+        super().__init__()
         self.beta = th.nn.Parameter(th.tensor(configs.margin.beta))
 
     def raw(self, repA, repP, repN):
         '''
         raw mode used by robrank/defenses/pnp
         '''
-        #print('marigin raw is called!')
-        loss = fn_pmargin_kernel(repA, repP, repN, metric=self._metric,
+        return fn_pmargin_kernel(repA, repP, repN, metric=self._metric,
                                  margin=self._margin, beta=self.beta)
-        return loss
 
     def forward(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
-    def __call__(self, *args, **kwargs):
         if int(os.getenv('DEBUG', -1)) > 0:
             print('* margin: current beta = ', self.beta.data)
-        return ft.partial(fn_pmargin, metric=self._metric,
+        return fn_pmargin(*args, metric=self._metric,
                           minermethod=self._minermethod,
-                          beta=self.beta, margin=self._margin)(*args, **kwargs)
+                          beta=self.beta, margin=self._margin, **kwargs)
 
     def determine_metric(self):
         return self._metric
@@ -106,8 +100,7 @@ class pmarginC(th.nn.Module):
         return 'SPC-2'
 
     def getOptim(self):
-        optim = th.optim.SGD(self.parameters(), lr=configs.margin.lr_beta)
-        return optim
+        return th.optim.SGD(self.parameters(), lr=configs.margin.lr_beta)
 
 
 class pmarginE(pmarginC):
