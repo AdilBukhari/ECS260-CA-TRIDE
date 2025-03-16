@@ -45,8 +45,7 @@ def fn_psnr_kernel(repA: th.Tensor, repP: th.Tensor, repN: th.Tensor, *,
     reg_los = th.mean(th.abs(th.sum(repA, dim=1)))
     snr_los = (pos_snr - neg_snr + margin).relu()
     snr_los = th.sum(snr_los) / th.sum(snr_los > 0)
-    loss = snr_los + reg_lambda * reg_los
-    return loss
+    return snr_los + reg_lambda * reg_los
 
 
 def fn_psnr(repres: th.Tensor, labels: th.Tensor,
@@ -54,15 +53,11 @@ def fn_psnr(repres: th.Tensor, labels: th.Tensor,
     '''
     SNR Loss function for DML
     '''
-    # Determine the margin for the specific metric
     if metric in ('C', 'N'):
         repres = F.normalize(repres, p=2, dim=-1)
-    # Sample the triplets
     anc, pos, neg = miner(repres, labels, method=minermethod,
                           metric=metric, margin=configs.snr.margin, p_switch=p_switch)
-    # Calculate Loss
-    loss = fn_psnr_kernel(repres[anc, :], repres[pos, :], repres[neg, :])
-    return loss
+    return fn_psnr_kernel(repres[anc, :], repres[pos, :], repres[neg, :])
 
 
 class psnr(th.nn.Module):
@@ -70,12 +65,8 @@ class psnr(th.nn.Module):
     _minermethod = 'spc2-random'
 
     def __call__(self, *args, **kwargs):
-        if hasattr(self, '_minermethod'):
-            return ft.partial(fn_psnr, metric=self._metric,
-                              minermethod=self._minermethod)(*args, **kwargs)
-        else:
-            return ft.partial(fn_psnr, metric=self._metric)(
-                *args, **kwargs)
+        return ft.partial(fn_psnr, metric=self._metric,
+                          minermethod=self._minermethod)(*args, **kwargs)
 
     def determine_metric(self):
         return self._metric
