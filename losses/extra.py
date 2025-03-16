@@ -40,9 +40,15 @@ def _index_filter(indeces: tuple, most: int):
 
 
 class ExtraLossN(th.nn.Module):
+    def __init__(self, lossfunc, miner, datasetspec, metric):
+        super().__init__()
+        self._lossfunc = lossfunc
+        self._miner = miner
+        self._datasetspec = datasetspec
+        self._metric = metric
 
-    def __call__(self, *args, **kwargs):
-        repres, labels = args[0], args[1].view(-1)
+    def forward(self, repres, labels):
+        labels = labels.view(-1)
         repres = th.nn.functional.normalize(repres, p=2)
         indeces = self._miner(repres, labels)
         indeces = _index_filter(indeces, repres.size(0))
@@ -55,25 +61,36 @@ class ExtraLossN(th.nn.Module):
         return self._datasetspec
 
 
-class pstripN(ExtraLossN):
-    _datasetspec = 'SPC-2'
-    _lossfunc = dml.losses.TripletMarginLoss(
+pstripN = ExtraLossN(
+    lossfunc=dml.losses.TripletMarginLoss(
         margin=configs.triplet.margin_euclidean,
         reducer=dml.reducers.ThresholdReducer(low=0.),
-        distance=dml.distances.LpDistance(
-            p=2, power=1, normalize_embeddings=True)
-    )
-    _miner = dml.miners.TripletMarginMiner(
+        distance=dml.distances.LpDistance(p=2, power=1, normalize_embeddings=True)
+    ),
+    miner=dml.miners.TripletMarginMiner(
         margin=configs.triplet.margin_euclidean,
-        type_of_triplets='semihard')
-    _metric = 'N'
+        type_of_triplets='semihard'
+    ),
+    datasetspec='SPC-2',
+    metric='N'
+)
 
+pangularN = ExtraLossN(
+    lossfunc=dml.losses.AngularLoss(),
+    miner=dml.miners.AngularMiner(),
+    datasetspec='SPC-2',
+    metric='N'
+)
 
-class pangularN(ExtraLossN):
-    _datasetspec = 'SPC-2'
-    _lossfunc = dml.losses.AngularLoss()
-    _miner = dml.miners.AngularMiner()
-    _metric = 'N'
+pncaN = ExtraLossN(
+    lossfunc=dml.losses.NCALoss(),
+    miner=dml.miners.TripletMarginMiner(
+        margin=configs.triplet.margin_euclidean,
+        type_of_triplets='semihard'
+    ),
+    datasetspec='SPC-2',
+    metric='N'
+)
 
 
 class pncaN(ExtraLossN):
